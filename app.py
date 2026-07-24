@@ -18,10 +18,36 @@ from pydub import AudioSegment
 SAVED_VOICES_DIR = os.path.join(BASE_DIR, "saved_voices")
 os.makedirs(SAVED_VOICES_DIR, exist_ok=True)
 
-EDGE_TTS_EXE = os.path.join(BASE_DIR, "venv", "Scripts", "edge-tts.exe")
-F5_TTS_EXE = os.path.join(BASE_DIR, "venv", "Scripts", "f5-tts_infer-cli.exe")
+def _find_exe(name):
+    """Locate a CLI tool cross-platform.
+    1) Local venv first (venv/Scripts on Windows, venv/bin on Linux/Mac) -
+       this preserves the existing local Windows dev workflow untouched.
+    2) Fall back to PATH - this is what resolves inside the Docker container,
+       where the tool is installed straight into the system/container Python
+       and there is no venv/ folder at all.
+    3) Last resort: return the bare name so subprocess raises a clear
+       'not found' error instead of failing on a nonsense hardcoded path.
+    """
+    exe_name = name + (".exe" if os.name == "nt" else "")
+    subdir = "Scripts" if os.name == "nt" else "bin"
+    local = os.path.join(BASE_DIR, "venv", subdir, exe_name)
+    if os.path.exists(local):
+        return local
+    found = shutil.which(name)
+    if found:
+        return found
+    return name
+
+EDGE_TTS_EXE = _find_exe("edge-tts")
+F5_TTS_EXE = _find_exe("f5-tts_infer-cli")
 RVC_MODELS_DIR = os.path.join(BASE_DIR, "rvc_models")
-RVC_PYTHON_EXE = os.path.join(BASE_DIR, "rvc_venv", "Scripts", "python.exe")
+# Originally a separate rvc_venv (likely to dodge a torch/dependency clash
+# with F5-TTS + transformers). In Docker we run everything in ONE image with
+# ONE Python env, so this now just points at whichever interpreter is
+# running app.py itself. If `pip install` for rvc-python conflicts with
+# torch/transformers versions needed elsewhere, that will surface as an
+# install error today - test for it before assuming this works.
+RVC_PYTHON_EXE = sys.executable
 RVC_INFER_SCRIPT = os.path.join(BASE_DIR, "rvc_infer.py")
 os.makedirs(RVC_MODELS_DIR, exist_ok=True)
 

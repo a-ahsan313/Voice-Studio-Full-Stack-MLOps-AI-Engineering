@@ -1,12 +1,25 @@
+# --- CPU-only torch build (avoids pulling ~2GB+ of unused CUDA wheels) ---
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+torchaudio
+
+# --- Core app ---
 gradio
-yt-dlp
-
-
 pydub
 tomli_w
 soundfile
 numpy
-transformers
+transformers        # used for Whisper (quality scoring in Voice Training Studio)
+
+# --- External CLI tools app.py shells out to via subprocess ---
 edge-tts
-f5-tts
-rvc_python
+f5-tts               # provides f5-tts_infer-cli
+rvc-python           # used inside rvc_infer.py
+
+# --- Task 4 audio gathering ---
+yt-dlp
+
+# NOTE: "TTS" (Coqui) was in the original requirements.txt but is never
+# imported anywhere in app.py, rvc_infer.py, or transliterate.py - dropped
+# to avoid its C++ Build Tools install failure for no functional benefit.
+# If something breaks that traces back to needing it after all, add it back.

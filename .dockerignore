@@ -1,0 +1,10 @@
+venv/
+rvc_venv/
+__pycache__/
+*.pyc
+.git/
+temp/
+hf_cache/
+rvc_models/.cache/
+*.wav
+!saved_voices/**/*.wav
