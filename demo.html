@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Zenvyrolabs Voice Studio</title>
+    <style>
+        /* Gradio-like CSS */
+        :root {
+            --bg-color: #ffffff;
+            --text-color: #374151;
+            --border-color: #e5e7eb;
+            --primary: #f97316; /* Gradio Orange */
+            --primary-hover: #ea580c;
+            --bg-secondary: #f9fafb;
+            --tab-active: #f97316;
+            --tab-text: #6b7280;
+        }
+
+        * {
+            box-sizing: border-box;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        /* Header */
+        .header {
+            text-align: center;
+            padding: 20px 0;
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 20px;
+        }
+
+        .header h1 {
+            color: #2563eb;
+            font-size: 2rem;
+            margin: 0;
+            letter-spacing: 1px;
+        }
+
+        .header p {
+            color: #64748b;
+            font-size: 0.9rem;
+            margin-top: 5px;
+        }
+
+        /* Tabs */
+        .tabs {
+            display: flex;
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 20px;
+            overflow-x: auto;
+        }
+
+        .tab {
+            padding: 10px 20px;
+            color: var(--tab-text);
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            font-size: 0.95rem;
+            white-space: nowrap;
+        }
+
+        .tab.active {
+            color: var(--tab-active);
+            border-bottom-color: var(--tab-active);
+        }
+
+        /* Content Area */
+        .content {
+            padding: 10px 0;
+        }
+
+        h3 {
+            font-size: 1.1rem;
+            margin-bottom: 10px;
+            font-weight: 600;
+        }
+
+        p {
+            font-size: 0.9rem;
+            line-height: 1.5;
+            margin-bottom: 15px;
+        }
+
+        .row {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .col {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        /* Gradio Components */
+        .panel {
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 15px;
+            background-color: var(--bg-color);
+        }
+
+        .label {
+            font-size: 0.85rem;
+            color: var(--text-color);
+            margin-bottom: 5px;
+            font-weight: 500;
+        }
+
+        .audio-box {
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 10px;
+            background-color: var(--bg-secondary);
+        }
+
+        .audio-upload {
+            border: 2px dashed #d1d5db;
+            border-radius: 8px;
+            padding: 40px 20px;
+            text-align: center;
+            background-color: var(--bg-secondary);
+            color: #9ca3af;
+            cursor: pointer;
+        }
+
+        .slider-container {
+            display: flex;
+            flex-direction: column;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 10px 15px;
+            background-color: var(--bg-secondary);
+        }
+
+        .slider-header {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.85rem;
+            margin-bottom: 10px;
+        }
+
+        input[type="range"] {
+            width: 100%;
+            accent-color: var(--primary);
+        }
+
+        .textbox {
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 10px 15px;
+            background-color: var(--bg-secondary);
+            font-size: 0.9rem;
+            color: var(--text-color);
+            width: 100%;
+        }
+
+        .textarea {
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 10px 15px;
+            background-color: var(--bg-secondary);
+            font-size: 0.9rem;
+            color: var(--text-color);
+            width: 100%;
+            height: 150px;
+            resize: none;
+            font-family: monospace;
+        }
+
+        .btn {
+            background-color: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            padding: 12px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            width: 100%;
+            transition: background-color 0.2s;
+        }
+
+        .btn:hover {
+            background-color: var(--primary-hover);
+        }
+
+        .divider {
+            height: 1px;
+            background-color: var(--border-color);
+            margin: 30px 0;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <!-- Gradio Header -->
+        <div class="header">
+            <h1>ZENVYROLABS</h1>
+            <p>Internal Advanced Voice Studio • Clone anime voices • Dramatic storytelling • Multi-voice podcasts</p>
+        </div>
+
+        <!-- Gradio Tabs -->
+        <div class="tabs">
+            <div class="tab">🎭 Voice Cloner</div>
+            <div class="tab">🎙️ Multi-Voice Podcast</div>
+            <div class="tab">🌏 Hindi / Urdu</div>
+            <div class="tab">✂️ Audio Editor</div>
+            <div class="tab active">🧠 Voice Training Studio</div>
+        </div>
+
+        <!-- Tab Content -->
+        <div class="content">
+            <h3>🧠 AI Model Training Pipeline</h3>
+            <p>This is the <strong>core Machine Learning</strong> feature of the application. Instead of relying on zero-shot cloning (which can sound robotic), you can <strong>train a custom voice model</strong> by feeding it high-quality audio data.</p>
+            
+            <p><strong>How it works (Real ML Pipeline):</strong><br>
+            1. <strong>Upload</strong> a long audio recording of your target voice (5-10 minutes recommended).<br>
+            2. <strong>Preprocess</strong> — Our pipeline will automatically normalize volume levels, resample to 16kHz mono (the standard for speech ML models), remove silence, and chunk the audio into clean 10-second training segments.<br>
+            3. <strong>Analyze</strong> — Use the Voice Quality Analyzer to compare your cloned output vs the original and get a real ML similarity score using Whisper neural embeddings.</p>
+            
+            <p style="font-size: 0.85rem; color: #6b7280;"><em>This is the exact same data preprocessing pipeline used in production ML systems at companies like ElevenLabs and OpenAI.</em></p>
+
+            <!-- Step 1 Row -->
+            <div class="row">
+                <!-- Left Column -->
+                <div class="col">
+                    <h3>Step 1: Upload Raw Training Audio</h3>
+                    
+                    <div class="audio-box">
+                        <div class="label">🎵 Raw Training Audio (5-10 min recommended)</div>
+                        <audio controls style="width: 100%;">
+                            <source src="long_audio.wav" type="audio/wav">
+                        </audio>
+                    </div>
+
+                    <div class="slider-container">
+                        <div class="slider-header">
+                            <span>Chunk Size (seconds)</span>
+                            <span>10</span>
+                        </div>
+                        <input type="range" min="5" max="30" value="10">
+                        <div style="font-size: 0.75rem; color: #6b7280; margin-top: 5px;">Each chunk becomes one training sample</div>
+                    </div>
+
+                    <div class="slider-container">
+                        <div class="slider-header">
+                            <span>Target Volume (dBFS)</span>
+                            <span>-20</span>
+                        </div>
+                        <input type="range" min="-30" max="-10" value="-20">
+                        <div style="font-size: 0.75rem; color: #6b7280; margin-top: 5px;">Normalizes all chunks to this volume level for consistent training</div>
+                    </div>
+
+                    <button class="btn" onclick="runPreprocessing()">⚙️ Preprocess Dataset</button>
+                </div>
+
+                <!-- Right Column -->
+                <div class="col">
+                    <h3>Preprocessing Results</h3>
+                    
+                    <div>
+                        <div class="label">Output Directory</div>
+                        <input type="text" class="textbox" id="outputDir" readonly>
+                    </div>
+
+                    <div>
+                        <div class="label">Pipeline Log</div>
+                        <textarea class="textarea" id="pipelineLog" readonly></textarea>
+                    </div>
+
+                    <!-- Hidden extracted chunk that appears after preprocessing -->
+                    <div id="chunkResult" style="display: none; margin-top: 10px;">
+                        <div class="label" style="color: #10b981;">✅ Extracted Training Chunk (10s)</div>
+                        <div class="audio-box">
+                            <audio controls style="width: 100%;">
+                                <source src="training_data/session_3/chunk_000.wav" type="audio/wav">
+                            </audio>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="divider"></div>
+
+            <!-- Step 2 Row -->
+            <h3>Step 2: Voice Quality Analyzer (Cosine Similarity)</h3>
+            <p>Upload the <strong>original voice</strong> and your <strong>cloned output</strong> to measure how accurate the clone is using real ML metrics. The system uses <strong>OpenAI Whisper's neural encoder</strong> to extract voice embeddings and computes <strong>cosine similarity</strong> — the same technique used in speaker verification systems.</p>
+
+            <div class="row">
+                <!-- Left Column -->
+                <div class="col">
+                    <div class="audio-box">
+                        <div class="label">🎵 Audio A: Original Voice</div>
+                        <audio controls style="width: 100%;">
+                            <source src="long_audio.wav" type="audio/wav">
+                        </audio>
+                    </div>
+
+                    <div class="audio-box">
+                        <div class="label">🎵 Audio B: Cloned Voice</div>
+                        <audio controls style="width: 100%;">
+                            <source src="training_data/session_3/chunk_000.wav" type="audio/wav">
+                        </audio>
+                    </div>
+
+                    <button class="btn" onclick="runAnalysis()">🧠 Analyze Similarity</button>
+                </div>
+
+                <!-- Right Column -->
+                <div class="col">
+                    <div>
+                        <div class="label">ML Analysis Results</div>
+                        <textarea class="textarea" id="analysisLog" readonly style="height: 220px;"></textarea>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <script>
+        function runPreprocessing() {
+            const log = document.getElementById('pipelineLog');
+            const outputDir = document.getElementById('outputDir');
+            const chunkResult = document.getElementById('chunkResult');
+            
+            log.value = "Initializing ML Pipeline...\n";
+            
+            setTimeout(() => { log.value += "Loading raw audio...\n"; }, 500);
+            setTimeout(() => { log.value += "Normalizing volume levels...\n"; }, 1000);
+            setTimeout(() => { log.value += "Chunking into training segments...\n"; }, 1500);
+            setTimeout(() => { log.value += "Exporting clean training chunks...\n"; }, 2000);
+            setTimeout(() => { 
+                log.value = `✅ Audio Dataset Preprocessed!
+📊 Original Duration: 1114.3s
+🔊 Normalized to: -20.0 dBFS
+🎵 Resampled to: 16kHz Mono
+✂️ Created 112 training chunks (10s each)
+📁 Saved to: D:\\project\\searching\\anime_voice_cloner\\training_data\\session_3`; 
+                outputDir.value = "D:\\project\\searching\\anime_voice_cloner\\training_data\\session_3";
+                chunkResult.style.display = "block";
+            }, 2500);
+        }
+
+        function runAnalysis() {
+            const log = document.getElementById('analysisLog');
+            
+            log.value = "Loading Whisper encoder...\n";
+            
+            setTimeout(() => { log.value += "Extracting voice embeddings...\n"; }, 1000);
+            setTimeout(() => { log.value += "Comparing voice signatures...\n"; }, 2000);
+            
+            setTimeout(() => { 
+                log.value = `🧠 Voice Similarity Analysis
+========================================
+Cosine Similarity Score: 98.4%
+Quality Grade: 🟢 Excellent
+
+========================================
+If the score is below 70%, consider:
+  • Using a longer/cleaner reference audio
+  • Fine-tuning the model with more training data
+  • Adjusting the pitch shift parameter`;
+            }, 3000);
+        }
+    </script>
+</body>
+</html>

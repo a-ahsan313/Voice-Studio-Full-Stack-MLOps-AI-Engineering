@@ -1,3 +1,12 @@
 gradio
-TTS
 yt-dlp
+
+
+pydub
+tomli_w
+soundfile
+numpy
+transformers
+edge-tts
+f5-tts
+rvc_python

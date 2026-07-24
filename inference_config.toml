@@ -1,0 +1,10 @@
+model = "F5TTS_Base"
+ref_audio = "D:\\project\\searching\\anime_voice_cloner\\temp\\trimmed_ref_gen.wav"
+ref_text = "This is a long audio recording designed to serve as a dataset for voice training."
+speed = 1.0
+nfe_step = 16
+gen_text = "Hey everyone! Welcome to the podcast."
+output_dir = "D:\\project\\searching\\anime_voice_cloner"
+output_file = "podcast_line_0.wav"
+
+[voices]
