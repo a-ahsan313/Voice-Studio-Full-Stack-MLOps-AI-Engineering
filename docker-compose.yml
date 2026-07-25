@@ -1,0 +1,27 @@
+services:
+  voice-studio:
+    build: .
+    image: voice-studio:latest
+    container_name: voice-studio
+    ports:
+      - "7860:7860"
+    volumes:
+      # Bind mounts (not named volumes) so the data is visible directly in
+      # the project folder on Windows too - easy to inspect/back up.
+      - ./saved_voices:/app/saved_voices
+      - ./rvc_models:/app/rvc_models
+      - ./training_data:/app/training_data
+      # Hugging Face model cache - without this, F5-TTS/Whisper re-download
+      # their models from scratch every single container restart, which is
+      # painful on a CPU-only machine with normal home internet.
+      - ./hf_cache:/app/hf_cache
+    environment:
+      - GRADIO_SERVER_NAME=0.0.0.0
+    restart: unless-stopped
+    # CPU-only box: cap memory so the container can't OOM the whole host
+    # if Whisper/F5-TTS get greedy. Raise this if you see the container
+    # getting killed (check `docker stats` / `docker inspect voice-studio`).
+    deploy:
+      resources:
+        limits:
+          memory: 6G

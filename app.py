@@ -850,4 +850,12 @@ The system uses **OpenAI Whisper's neural encoder** to extract voice embeddings 
 if __name__ == "__main__":
     print("Launching Advanced Voice Studio...")
     print(f"Saved Voices: {get_saved_voices()}")
-    interface.launch(server_name="127.0.0.1", inbrowser=True, css=custom_css)
+    # In Docker, GRADIO_SERVER_NAME=0.0.0.0 (set in docker-compose.yml) so the
+    # port mapping can actually reach the app. Locally on Windows this still
+    # defaults to 127.0.0.1 + opens your browser automatically, unchanged.
+    _in_container = os.environ.get("GRADIO_SERVER_NAME") is not None
+    interface.launch(
+        server_name=os.environ.get("GRADIO_SERVER_NAME", "127.0.0.1"),
+        inbrowser=not _in_container,
+        css=custom_css,
+    )

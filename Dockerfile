@@ -6,6 +6,7 @@ FROM python:3.11-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         git \
+        curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -23,5 +24,11 @@ COPY . .
 RUN mkdir -p saved_voices rvc_models training_data temp hf_cache
 
 EXPOSE 7860
+
+# Gradio serves its UI at "/" - a 200 there means the app is genuinely up,
+# not just that the process hasn't crashed yet. start-period gives it room
+# for slow first-load model downloads on CPU.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:7860/ || exit 1
 
 CMD ["python", "app.py"]
