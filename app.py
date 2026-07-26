@@ -747,7 +747,7 @@ LUFFY: Let's gooo!
         with gr.TabItem("🎤 Voice-to-Voice (RVC)", visible=False):
             gr.Markdown("""### True Emotional Voice Cloning (Speech-to-Speech)
 Upload an audio of **you acting out a line**, select a downloaded `.pth` anime character model, and the AI will convert your voice while preserving exactly the timing, emotion, and breath.
-*(Models must be placed in `e:\project\searching\anime_voice_cloner\\rvc_models`)*""")
+*(Models must be placed in the `rvc_models/` folder next to the app - `rvc_models/` locally, or the mounted volume in Docker)*""")
             with gr.Row():
                 with gr.Column():
                     rvc_in = gr.Audio(type="filepath", label="Input Audio (Your acting/reference)")
