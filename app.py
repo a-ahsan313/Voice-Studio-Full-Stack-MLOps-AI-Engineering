@@ -114,12 +114,12 @@ def get_rvc_models():
                 models.append(f)
     return models
 
-def run_rvc_conversion(input_audio, model_name, pitch):
+def run_rvc_conversion(input_audio, model_name, pitch, output_name="rvc_output.wav"):
     if not input_audio: return None, "Please upload a reference audio."
     if not model_name: return None, "Please select an RVC model (.pth)."
     
     model_path = os.path.join(RVC_MODELS_DIR, model_name)
-    output_path = os.path.join(BASE_DIR, "rvc_output.wav")
+    output_path = os.path.join(BASE_DIR, output_name)
     
     cmd = [
         RVC_PYTHON_EXE, RVC_INFER_SCRIPT,
@@ -311,28 +311,94 @@ def extract_text_fn(audio_path, progress=gr.Progress()):
 # ─── Tab 4: Multi-Voice Podcast ───
 import re
 
+# Same Edge-TTS voices already offered in the Hindi/Urdu tab, used here as
+# the "correct pronunciation" base before RVC morphs it into the character.
+HINDI_URDU_NEURAL_VOICE = {"hi": "hi-IN-MadhurNeural", "ur": "ur-PK-AsadNeural"}
+_LANG_TAG_RE = re.compile(r'^\[(hi|ur)\]\s*', re.IGNORECASE)
+
+def _detect_line_language(dialogue):
+    """Returns ('hi'|'ur'|None, cleaned_dialogue).
+    Native Devanagari/Urdu script is auto-detected reliably. Romanized
+    Hindi/Urdu ("kya haal hai") looks like plain English to a script check,
+    and a full language-ID model is overkill for this CPU-only pipeline -
+    so for Romanized lines, the script author can force routing with an
+    explicit tag at the start of the line: 'NARUTO: [hi] kya haal hai'.
+    """
+    tag_match = _LANG_TAG_RE.match(dialogue)
+    if tag_match:
+        return tag_match.group(1).lower(), _LANG_TAG_RE.sub('', dialogue, count=1).strip()
+    if any('\u0900' <= c <= '\u097F' for c in dialogue):
+        return "hi", dialogue
+    if any('\u0600' <= c <= '\u06FF' for c in dialogue):
+        return "ur", dialogue
+    return None, dialogue
+
+def _match_rvc_model_for_character(char_name, available_models):
+    """Match a character name to an RVC .pth file by name, e.g. saved voice
+    'Gojo Satoru' <-> rvc_models/Gojo_Satoru.pth. Podcast characters (F5-TTS
+    reference clips in saved_voices/) and RVC models (.pth files in
+    rvc_models/) are two separate namespaces in this project with no
+    existing link - filename matching is the simplest bridge between them
+    without requiring a UI change to saved_voices' data model."""
+    key = char_name.strip().lower().replace(" ", "_")
+    for model_file in available_models:
+        stem = os.path.splitext(model_file)[0].lower()
+        if stem == key or stem == char_name.strip().lower():
+            return model_file
+    return None
+
 def parse_podcast_script(script_text):
-    """Parse a script like 'NARUTO: Hey! \n LUFFY: Yo!' into [(name, line), ...]"""
+    """Parse a script like 'NARUTO: Hey! \n LUFFY: Yo!' into [(name, line), ...].
+
+    Also returns a list of (line_number, raw_text, reason) for every line
+    that could NOT be parsed, so the caller can tell the user exactly what
+    was skipped and why - instead of lines silently vanishing with no
+    explanation, which was the original behavior.
+
+    Name pattern intentionally allows spaces/hyphens/apostrophes/periods so
+    names like "IRON MAN", "MARY-JANE", "O'BRIEN", "DR. STRANGE" all work -
+    the original [A-Za-z0-9_]+ only matched single unpunctuated words and
+    silently dropped everything else.
+    """
     lines = []
-    for raw_line in script_text.strip().split("\n"):
-        raw_line = raw_line.strip()
-        if not raw_line:
+    warnings = []
+    name_pattern = re.compile(r"^([A-Za-z][A-Za-z0-9 '\-\.]{0,40}?)\s*:\s*(.*)$")
+
+    for line_no, raw_line in enumerate(script_text.strip().split("\n"), start=1):
+        stripped = raw_line.strip()
+        if not stripped:
             continue
-        match = re.match(r'^([A-Za-z0-9_]+)\s*:\s*(.+)$', raw_line)
-        if match:
-            name = match.group(1).strip()
-            dialogue = match.group(2).strip()
-            if dialogue:
-                lines.append((name, dialogue))
-    return lines
+
+        match = name_pattern.match(stripped)
+        if not match:
+            if ":" not in stripped:
+                warnings.append((line_no, stripped, "no ':' found - expected 'NAME: dialogue'"))
+            else:
+                warnings.append((line_no, stripped, "couldn't identify a speaker name before the ':'"))
+            continue
+
+        name = match.group(1).strip()
+        dialogue = match.group(2).strip()
+        if not dialogue:
+            warnings.append((line_no, stripped, f"no dialogue after '{name}:'"))
+            continue
+
+        lines.append((name, dialogue))
+
+    return lines, warnings
 
 def generate_podcast(script_text, pause_ms, progress=gr.Progress()):
     if not script_text.strip():
         return None, "Write a script first."
 
-    parsed = parse_podcast_script(script_text)
+    parsed, parse_warnings = parse_podcast_script(script_text)
     if not parsed:
-        return None, "❌ Could not parse script. Use format:\nNARUTO: Hey Luffy!\nLUFFY: Hey Naruto!"
+        msg = "❌ Could not parse script. Use format:\nNARUTO: Hey Luffy!\nLUFFY: Hey Naruto!"
+        if parse_warnings:
+            msg += "\n\nLines that couldn't be read:\n" + "\n".join(
+                f"  Line {n}: \"{txt}\" - {reason}" for n, txt, reason in parse_warnings
+            )
+        return None, msg
 
     # Collect unique character names
     characters = list(dict.fromkeys([name for name, _ in parsed]))
@@ -357,10 +423,19 @@ def generate_podcast(script_text, pause_ms, progress=gr.Progress()):
             f"Go to the Voice Cloner tab to save voices first."
         )
 
+    # Match characters to an RVC model too (for Hindi/Urdu hybrid routing)
+    available_rvc = get_rvc_models()
+    rvc_map = {char: _match_rvc_model_for_character(char, available_rvc) for char in characters}
+
     log_lines = []
     log_lines.append(f"📋 Parsed {len(parsed)} lines from {len(characters)} characters")
+    if parse_warnings:
+        log_lines.append(f"⚠️ Skipped {len(parse_warnings)} unparseable line(s):")
+        for n, txt, reason in parse_warnings:
+            log_lines.append(f"    Line {n}: \"{txt}\" - {reason}")
     for char in characters:
-        log_lines.append(f"  {char} → voice '{voice_map[char]}'")
+        rvc_note = f", RVC model '{rvc_map[char]}' available for Hindi/Urdu lines" if rvc_map[char] else ""
+        log_lines.append(f"  {char} → voice '{voice_map[char]}'{rvc_note}")
 
     # Generate each line
     audio_segments = []
@@ -370,29 +445,76 @@ def generate_podcast(script_text, pause_ms, progress=gr.Progress()):
         progress((i + 1) / len(parsed), desc=f"Generating line {i+1}/{len(parsed)}: {char}...")
         log_lines.append(f"\n🎙️ [{i+1}/{len(parsed)}] {char}: \"{dialogue[:50]}...\"")
 
-        voice_name = voice_map[char]
-        voice_audio, voice_text = load_voice(voice_name)
-        if not voice_audio:
-            log_lines.append(f"  ⚠️ Audio file missing for '{voice_name}', skipping.")
-            continue
+        lang, clean_dialogue = _detect_line_language(dialogue)
+        rvc_model = rvc_map.get(char)
 
-        out_name = f"podcast_line_{i}.wav"
-        path, gen_log = run_f5tts(dialogue, voice_audio, voice_text, output_name=out_name)
+        if lang and rvc_model:
+            # Hybrid path: Edge-TTS gives correct Hindi/Urdu pronunciation,
+            # RVC then morphs that into this character's actual voice.
+            final_text = clean_dialogue
+            if lang == "hi" and not any('\u0900' <= c <= '\u097F' for c in clean_dialogue):
+                from transliterate import roman_to_devanagari
+                final_text = roman_to_devanagari(clean_dialogue)
+                log_lines.append(f"  🔄 Transliterated to: {final_text}")
+
+            base_path = os.path.join(TEMP_DIR, f"podcast_base_{i}.mp3")
+            ok, err = run_edge_tts(final_text, HINDI_URDU_NEURAL_VOICE[lang], base_path)
+            if not ok:
+                log_lines.append(f"  ❌ Edge-TTS pronunciation step failed: {err}")
+                continue
+
+            out_name = f"podcast_line_{i}.wav"
+            path, gen_log = run_rvc_conversion(base_path, rvc_model, pitch=0, output_name=out_name)
+            if path and os.path.exists(path):
+                log_lines.append(f"  ✅ [{lang.upper()} hybrid: Edge-TTS→RVC '{rvc_model}']")
+            else:
+                log_lines.append(f"  ❌ RVC step failed: {gen_log}")
+
+        else:
+            if lang and not rvc_model:
+                log_lines.append(f"  ⚠️ Hindi/Urdu line detected but no RVC model matches '{char}' "
+                                  f"(expected rvc_models/{char.replace(' ', '_')}.pth) - using standard cloning, "
+                                  f"pronunciation may be imperfect.")
+            voice_name = voice_map[char]
+            voice_audio, voice_text = load_voice(voice_name)
+            if not voice_audio:
+                log_lines.append(f"  ⚠️ Audio file missing for '{voice_name}', skipping.")
+                continue
+
+            out_name = f"podcast_line_{i}.wav"
+            path, gen_log = run_f5tts(dialogue, voice_audio, voice_text, output_name=out_name)
+            if not (path and os.path.exists(path)):
+                log_lines.append(f"  ❌ Failed: {gen_log}")
+                continue
 
         if path and os.path.exists(path):
             seg = AudioSegment.from_file(path)
             audio_segments.append(seg)
             log_lines.append(f"  ✅ {len(seg)/1000:.1f}s generated")
-        else:
-            log_lines.append(f"  ❌ Failed: {gen_log}")
 
     if not audio_segments:
         return None, "\n".join(log_lines) + "\n\n❌ No audio was generated."
 
-    # Stitch together with pauses
-    log_lines.append(f"\n🔗 Stitching {len(audio_segments)} segments...")
-    final = audio_segments[0]
-    for seg in audio_segments[1:]:
+    # Stitch together with pauses, softening each segment's edges into the
+    # silence so transitions don't sound like sudden robotic cuts. A hard
+    # waveform edge dropping straight to a flat zero-silence line is what
+    # produces the audible "click"/"pop" at every speaker change - fading
+    # each clip's start/end removes that discontinuity.
+    log_lines.append(f"\n🔗 Stitching {len(audio_segments)} segments with smoothed transitions...")
+    FADE_MS = 60  # short enough to stay inaudible as an effect, long enough to kill the click
+
+    smoothed = []
+    for idx, seg in enumerate(audio_segments):
+        fade_amt = min(FADE_MS, len(seg) // 2)  # never fade more than half a very short clip
+        if fade_amt > 0:
+            if idx != 0:
+                seg = seg.fade_in(fade_amt)
+            if idx != len(audio_segments) - 1:
+                seg = seg.fade_out(fade_amt)
+        smoothed.append(seg)
+
+    final = smoothed[0]
+    for seg in smoothed[1:]:
         final = final + pause + seg
 
     output_path = os.path.join(BASE_DIR, "podcast_output.wav")
