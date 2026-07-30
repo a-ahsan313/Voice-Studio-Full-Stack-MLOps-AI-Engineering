@@ -10,6 +10,7 @@ tomli_w
 soundfile
 numpy
 transformers        # used for Whisper (quality scoring in Voice Training Studio)
+noisereduce         # background noise removal in the training preprocessing pipeline
 
 # --- External CLI tools app.py shells out to via subprocess ---
 edge-tts

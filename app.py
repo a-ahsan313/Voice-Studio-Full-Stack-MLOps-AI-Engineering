@@ -578,8 +578,76 @@ def edit_audio_replace(audio_path, start_s, end_s, text, voice_name, progress=gr
 TRAINING_DIR = os.path.join(BASE_DIR, "training_data")
 os.makedirs(TRAINING_DIR, exist_ok=True)
 
+def _denoise_audio(audio, progress=None, progress_range=(0.2, 0.45)):
+    """Reduce background noise/music beds via spectral gating (noisereduce),
+    operating on the raw sample data. Expects mono audio. Wrapped so a
+    denoise failure degrades gracefully (returns the original audio +
+    a warning) instead of aborting the whole preprocessing run - this is
+    a newer/less battle-tested dependency than pydub, so don't let it take
+    the pipeline down with it.
+
+    Processes in 30s windows rather than one call across the whole file:
+    on a long (10+ min) clip on a slow CPU, a single blocking call would
+    leave the progress bar frozen with zero feedback for however long that
+    takes. Windowing gives incremental progress and keeps each individual
+    call's CPU/memory cost bounded. Trade-off: very faint discontinuities
+    are possible at window boundaries (30s apart) - inaudible in practice,
+    and a reasonable price for a responsive UI on CPU-only machines.
+    """
+    try:
+        import noisereduce as nr
+        import numpy as np
+        samples = np.array(audio.get_array_of_samples()).astype(np.float32)
+        sr = audio.frame_rate
+        window_samples = int(30 * sr)  # 30s windows
+        total = len(samples)
+        out = np.empty_like(samples)
+        n_windows = max(1, (total + window_samples - 1) // window_samples)
+
+        for i in range(n_windows):
+            start = i * window_samples
+            end = min(start + window_samples, total)
+            out[start:end] = nr.reduce_noise(y=samples[start:end], sr=sr, stationary=False)
+            if progress is not None:
+                lo, hi = progress_range
+                frac = lo + (hi - lo) * ((i + 1) / n_windows)
+                progress(frac, desc=f"Removing background noise... ({i+1}/{n_windows})")
+
+        reduced = np.clip(out, -32768, 32767).astype(np.int16)
+        return audio._spawn(reduced.tobytes()), None
+    except Exception as e:
+        return audio, f"denoise skipped ({e})"
+
+def _trim_silence(audio, min_silence_len=600, silence_thresh_offset=16, keep_gap_ms=200):
+    """Cut out long dead-air stretches so training chunks are packed with
+    actual speech instead of being wasted on silence - this is what makes
+    'genuinely messy downloaded audio' (long pauses, dead air) unusable as
+    training data if left untouched. Keeps a short natural gap between
+    speech segments rather than splicing them together edge-to-edge.
+    Returns (trimmed_audio, seconds_removed).
+    """
+    from pydub.silence import detect_nonsilent
+    original_len = len(audio)
+    silence_thresh = audio.dBFS - silence_thresh_offset
+    nonsilent_ranges = detect_nonsilent(audio, min_silence_len=min_silence_len, silence_thresh=silence_thresh)
+
+    if not nonsilent_ranges:
+        # Detection found nothing "non-silent" at all - likely a very quiet
+        # clip rather than truly empty. Don't destroy it; let normalization/
+        # chunking downstream handle it instead of returning empty audio.
+        return audio, 0.0
+
+    gap = AudioSegment.silent(duration=keep_gap_ms)
+    trimmed = audio[nonsilent_ranges[0][0]:nonsilent_ranges[0][1]]
+    for start, end in nonsilent_ranges[1:]:
+        trimmed += gap + audio[start:end]
+
+    removed_seconds = (original_len - len(trimmed)) / 1000.0
+    return trimmed, removed_seconds
+
 def preprocess_training_audio(audio_path, chunk_seconds=10, normalize_db=-20.0, progress=gr.Progress()):
-    """Real ML data pipeline: chunk, normalize, and clean audio for model training."""
+    """Real ML data pipeline: denoise, trim silence, chunk, and normalize
+    audio for model training."""
     if not audio_path:
         return None, "Upload an audio file first."
     try:
@@ -587,32 +655,43 @@ def preprocess_training_audio(audio_path, chunk_seconds=10, normalize_db=-20.0, 
         audio = AudioSegment.from_file(audio_path)
         original_duration = len(audio) / 1000.0
 
-        # Step 1: Normalize volume (ML best practice for consistent training data)
-        progress(0.3, desc="Normalizing volume levels...")
+        # Step 1: Convert to mono 16kHz first - denoise/silence-detection
+        # both need a consistent single-channel signal to work on, and this
+        # was previously done last, after chunking logic was already laid out.
+        audio = audio.set_channels(1).set_frame_rate(16000)
+
+        # Step 2: Denoise (background music/hiss/hum from downloaded clips)
+        audio, denoise_warning = _denoise_audio(audio, progress=progress)
+
+        # Step 3: Normalize volume (ML best practice for consistent training data)
+        progress(0.4, desc="Normalizing volume levels...")
         change_in_dBFS = normalize_db - audio.dBFS
         audio = audio.apply_gain(change_in_dBFS)
 
-        # Step 2: Convert to mono 16kHz (standard for speech ML models)
-        audio = audio.set_channels(1).set_frame_rate(16000)
+        # Step 4: Trim long silences/dead air
+        progress(0.55, desc="Trimming silence and dead air...")
+        audio, silence_removed_s = _trim_silence(audio)
 
-        # Step 3: Chunk into training segments
-        progress(0.5, desc="Chunking into training segments...")
+        # Step 5: Chunk into training segments
+        progress(0.7, desc="Chunking into training segments...")
         chunk_ms = int(chunk_seconds * 1000)
         chunks = [audio[i:i + chunk_ms] for i in range(0, len(audio), chunk_ms)]
         # Drop last chunk if too short (< 2 seconds)
         chunks = [c for c in chunks if len(c) >= 2000]
 
-        # Step 4: Export each chunk
+        # Step 6: Export each chunk
         session_dir = os.path.join(TRAINING_DIR, f"session_{len(os.listdir(TRAINING_DIR))}")
         os.makedirs(session_dir, exist_ok=True)
 
-        progress(0.7, desc="Exporting clean training chunks...")
+        progress(0.9, desc="Exporting clean training chunks...")
         for i, chunk in enumerate(chunks):
             chunk.export(os.path.join(session_dir, f"chunk_{i:03d}.wav"), format="wav")
 
         log = (
             f"✅ Audio Dataset Preprocessed!\n"
             f"📊 Original Duration: {original_duration:.1f}s\n"
+            f"🧹 Denoised: {'yes' if not denoise_warning else denoise_warning}\n"
+            f"🔇 Silence Removed: {silence_removed_s:.1f}s\n"
             f"🔊 Normalized to: {normalize_db} dBFS\n"
             f"🎵 Resampled to: 16kHz Mono\n"
             f"✂️ Created {len(chunks)} training chunks ({chunk_seconds}s each)\n"
