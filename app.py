@@ -18,36 +18,20 @@ from pydub import AudioSegment
 SAVED_VOICES_DIR = os.path.join(BASE_DIR, "saved_voices")
 os.makedirs(SAVED_VOICES_DIR, exist_ok=True)
 
-def _find_exe(name):
-    """Locate a CLI tool cross-platform.
-    1) Local venv first (venv/Scripts on Windows, venv/bin on Linux/Mac) -
-       this preserves the existing local Windows dev workflow untouched.
-    2) Fall back to PATH - this is what resolves inside the Docker container,
-       where the tool is installed straight into the system/container Python
-       and there is no venv/ folder at all.
-    3) Last resort: return the bare name so subprocess raises a clear
-       'not found' error instead of failing on a nonsense hardcoded path.
-    """
-    exe_name = name + (".exe" if os.name == "nt" else "")
-    subdir = "Scripts" if os.name == "nt" else "bin"
-    local = os.path.join(BASE_DIR, "venv", subdir, exe_name)
-    if os.path.exists(local):
-        return local
-    found = shutil.which(name)
-    if found:
-        return found
-    return name
+# ─── Cross-platform exe finder (works on Windows venv AND inside Linux Docker) ───
+def find_exe(venv_dir, name):
+    win_path = os.path.join(BASE_DIR, venv_dir, "Scripts", f"{name}.exe")
+    nix_path = os.path.join(BASE_DIR, venv_dir, "bin", name)
+    if os.path.exists(win_path):
+        return win_path
+    if os.path.exists(nix_path):
+        return nix_path
+    return shutil.which(name) or name  # Docker: single global env, just call by name
 
-EDGE_TTS_EXE = _find_exe("edge-tts")
-F5_TTS_EXE = _find_exe("f5-tts_infer-cli")
+EDGE_TTS_EXE = find_exe("venv", "edge-tts")
+F5_TTS_EXE = find_exe("venv", "f5-tts_infer-cli")
 RVC_MODELS_DIR = os.path.join(BASE_DIR, "rvc_models")
-# Originally a separate rvc_venv (likely to dodge a torch/dependency clash
-# with F5-TTS + transformers). In Docker we run everything in ONE image with
-# ONE Python env, so this now just points at whichever interpreter is
-# running app.py itself. If `pip install` for rvc-python conflicts with
-# torch/transformers versions needed elsewhere, that will surface as an
-# install error today - test for it before assuming this works.
-RVC_PYTHON_EXE = sys.executable
+RVC_PYTHON_EXE = find_exe("rvc_venv", "python")
 RVC_INFER_SCRIPT = os.path.join(BASE_DIR, "rvc_infer.py")
 os.makedirs(RVC_MODELS_DIR, exist_ok=True)
 
@@ -114,12 +98,12 @@ def get_rvc_models():
                 models.append(f)
     return models
 
-def run_rvc_conversion(input_audio, model_name, pitch, output_name="rvc_output.wav"):
+def run_rvc_conversion(input_audio, model_name, pitch):
     if not input_audio: return None, "Please upload a reference audio."
     if not model_name: return None, "Please select an RVC model (.pth)."
     
     model_path = os.path.join(RVC_MODELS_DIR, model_name)
-    output_path = os.path.join(BASE_DIR, output_name)
+    output_path = os.path.join(BASE_DIR, "rvc_output.wav")
     
     cmd = [
         RVC_PYTHON_EXE, RVC_INFER_SCRIPT,
@@ -311,81 +295,83 @@ def extract_text_fn(audio_path, progress=gr.Progress()):
 # ─── Tab 4: Multi-Voice Podcast ───
 import re
 
-# Same Edge-TTS voices already offered in the Hindi/Urdu tab, used here as
-# the "correct pronunciation" base before RVC morphs it into the character.
-HINDI_URDU_NEURAL_VOICE = {"hi": "hi-IN-MadhurNeural", "ur": "ur-PK-AsadNeural"}
-_LANG_TAG_RE = re.compile(r'^\[(hi|ur)\]\s*', re.IGNORECASE)
-
-def _detect_line_language(dialogue):
-    """Returns ('hi'|'ur'|None, cleaned_dialogue).
-    Native Devanagari/Urdu script is auto-detected reliably. Romanized
-    Hindi/Urdu ("kya haal hai") looks like plain English to a script check,
-    and a full language-ID model is overkill for this CPU-only pipeline -
-    so for Romanized lines, the script author can force routing with an
-    explicit tag at the start of the line: 'NARUTO: [hi] kya haal hai'.
-    """
-    tag_match = _LANG_TAG_RE.match(dialogue)
-    if tag_match:
-        return tag_match.group(1).lower(), _LANG_TAG_RE.sub('', dialogue, count=1).strip()
-    if any('\u0900' <= c <= '\u097F' for c in dialogue):
-        return "hi", dialogue
-    if any('\u0600' <= c <= '\u06FF' for c in dialogue):
-        return "ur", dialogue
-    return None, dialogue
-
-def _match_rvc_model_for_character(char_name, available_models):
-    """Match a character name to an RVC .pth file by name, e.g. saved voice
-    'Gojo Satoru' <-> rvc_models/Gojo_Satoru.pth. Podcast characters (F5-TTS
-    reference clips in saved_voices/) and RVC models (.pth files in
-    rvc_models/) are two separate namespaces in this project with no
-    existing link - filename matching is the simplest bridge between them
-    without requiring a UI change to saved_voices' data model."""
-    key = char_name.strip().lower().replace(" ", "_")
-    for model_file in available_models:
-        stem = os.path.splitext(model_file)[0].lower()
-        if stem == key or stem == char_name.strip().lower():
-            return model_file
-    return None
-
 def parse_podcast_script(script_text):
     """Parse a script like 'NARUTO: Hey! \n LUFFY: Yo!' into [(name, line), ...].
-
-    Also returns a list of (line_number, raw_text, reason) for every line
-    that could NOT be parsed, so the caller can tell the user exactly what
-    was skipped and why - instead of lines silently vanishing with no
-    explanation, which was the original behavior.
-
-    Name pattern intentionally allows spaces/hyphens/apostrophes/periods so
-    names like "IRON MAN", "MARY-JANE", "O'BRIEN", "DR. STRANGE" all work -
-    the original [A-Za-z0-9_]+ only matched single unpunctuated words and
-    silently dropped everything else.
-    """
+    Crash-proof: handles any amount of whitespace around the colon, multi-word
+    character names (e.g. 'Naruto Uzumaki:'), and never throws — malformed
+    lines are collected as warnings instead of crashing the app."""
     lines = []
     warnings = []
-    name_pattern = re.compile(r"^([A-Za-z][A-Za-z0-9 '\-\.]{0,40}?)\s*:\s*(.*)$")
-
-    for line_no, raw_line in enumerate(script_text.strip().split("\n"), start=1):
-        stripped = raw_line.strip()
-        if not stripped:
+    for raw_line in script_text.strip().split("\n"):
+        raw_line = raw_line.strip()
+        if not raw_line:
             continue
-
-        match = name_pattern.match(stripped)
-        if not match:
-            if ":" not in stripped:
-                warnings.append((line_no, stripped, "no ':' found - expected 'NAME: dialogue'"))
-            else:
-                warnings.append((line_no, stripped, "couldn't identify a speaker name before the ':'"))
+        if ":" not in raw_line:
+            warnings.append(f'Skipped (no ":" found): "{raw_line[:50]}"')
             continue
-
-        name = match.group(1).strip()
-        dialogue = match.group(2).strip()
+        # Split on the FIRST colon only, so dialogue containing ':' (e.g. "5:30") still works
+        name_part, dialogue_part = raw_line.split(":", 1)
+        name = name_part.strip()
+        dialogue = dialogue_part.strip()
+        if not name:
+            warnings.append(f'Skipped (no character name before ":"): "{raw_line[:50]}"')
+            continue
         if not dialogue:
-            warnings.append((line_no, stripped, f"no dialogue after '{name}:'"))
+            warnings.append(f'Skipped (no dialogue after ":"): "{raw_line[:50]}"')
             continue
-
         lines.append((name, dialogue))
-
     return lines, warnings
+
+# ─── Hindi/Urdu detection + Perfect Pronunciation routing ───
+HINDI_NEURAL_VOICES = {
+    "male": "hi-IN-MadhurNeural",
+    "female": "hi-IN-SwaraNeural",
+}
+
+def contains_hindi_urdu(text):
+    """Detect Devanagari script OR common Romanized Hindi/Urdu words."""
+    if any('\u0900' <= c <= '\u097F' for c in text):
+        return True
+    try:
+        from transliterate import COMMON_WORDS
+    except Exception:
+        COMMON_WORDS = {}
+    words = re.findall(r"[A-Za-z']+", text.lower())
+    hits = sum(1 for w in words if w in COMMON_WORDS)
+    # If a meaningful chunk of the words are recognized Hindi/Urdu words, treat as Hindi/Urdu
+    return words and (hits / len(words)) >= 0.3
+
+def find_rvc_model_for_character(char_name):
+    """Try to find a matching RVC .pth model for a character name (case-insensitive, fuzzy)."""
+    models = get_rvc_models()
+    char_key = char_name.lower().replace(" ", "").replace("_", "")
+    for m in models:
+        m_key = m.lower().replace(" ", "").replace("_", "").replace(".pth", "")
+        if char_key in m_key or m_key in char_key:
+            return m
+    return None
+
+def generate_hindi_line_hybrid(dialogue, rvc_model_name, progress_cb=None):
+    """Perfect Pronunciation hybrid: Microsoft Neural Hindi TTS -> RVC voice morph.
+    Returns (AudioSegment or None, log_string)."""
+    text_to_speak = dialogue
+    if not any('\u0900' <= c <= '\u097F' for c in dialogue):
+        try:
+            from transliterate import roman_to_devanagari
+            text_to_speak = roman_to_devanagari(dialogue)
+        except Exception:
+            pass  # fall back to feeding the original romanized text to edge-tts
+
+    base_path = os.path.join(TEMP_DIR, f"hindi_base_{abs(hash(dialogue))}.mp3")
+    ok, err = run_edge_tts(text_to_speak, HINDI_NEURAL_VOICES["male"], base_path)
+    if not ok:
+        return None, f"❌ Hindi neural base generation failed: {err}"
+
+    final_path, rvc_log = run_rvc_conversion(base_path, rvc_model_name, pitch=0)
+    if not final_path or not os.path.exists(final_path):
+        return None, f"❌ RVC morph failed: {rvc_log}"
+
+    return AudioSegment.from_file(final_path), "✅ Native Hindi pronunciation + RVC voice morph"
 
 def generate_podcast(script_text, pause_ms, progress=gr.Progress()):
     if not script_text.strip():
@@ -393,11 +379,9 @@ def generate_podcast(script_text, pause_ms, progress=gr.Progress()):
 
     parsed, parse_warnings = parse_podcast_script(script_text)
     if not parsed:
-        msg = "❌ Could not parse script. Use format:\nNARUTO: Hey Luffy!\nLUFFY: Hey Naruto!"
+        msg = "❌ Could not parse any lines. Use format:\nNARUTO: Hey Luffy!\nLUFFY: Hey Naruto!"
         if parse_warnings:
-            msg += "\n\nLines that couldn't be read:\n" + "\n".join(
-                f"  Line {n}: \"{txt}\" - {reason}" for n, txt, reason in parse_warnings
-            )
+            msg += "\n\n⚠️ Issues found:\n" + "\n".join(parse_warnings)
         return None, msg
 
     # Collect unique character names
@@ -423,98 +407,67 @@ def generate_podcast(script_text, pause_ms, progress=gr.Progress()):
             f"Go to the Voice Cloner tab to save voices first."
         )
 
-    # Match characters to an RVC model too (for Hindi/Urdu hybrid routing)
-    available_rvc = get_rvc_models()
-    rvc_map = {char: _match_rvc_model_for_character(char, available_rvc) for char in characters}
-
     log_lines = []
-    log_lines.append(f"📋 Parsed {len(parsed)} lines from {len(characters)} characters")
     if parse_warnings:
-        log_lines.append(f"⚠️ Skipped {len(parse_warnings)} unparseable line(s):")
-        for n, txt, reason in parse_warnings:
-            log_lines.append(f"    Line {n}: \"{txt}\" - {reason}")
+        log_lines.append("⚠️ Some lines were skipped (fix formatting if this looks wrong):")
+        log_lines.extend(f"  {w}" for w in parse_warnings)
+        log_lines.append("")
+    log_lines.append(f"📋 Parsed {len(parsed)} lines from {len(characters)} characters")
     for char in characters:
-        rvc_note = f", RVC model '{rvc_map[char]}' available for Hindi/Urdu lines" if rvc_map[char] else ""
+        rvc_note = " (RVC model available for Hindi/Urdu)" if find_rvc_model_for_character(char) else ""
         log_lines.append(f"  {char} → voice '{voice_map[char]}'{rvc_note}")
 
     # Generate each line
     audio_segments = []
+    FADE_MS = 25  # small fade in/out on every clip so joins don't click/pop
     pause = AudioSegment.silent(duration=int(pause_ms))
 
     for i, (char, dialogue) in enumerate(parsed):
         progress((i + 1) / len(parsed), desc=f"Generating line {i+1}/{len(parsed)}: {char}...")
         log_lines.append(f"\n🎙️ [{i+1}/{len(parsed)}] {char}: \"{dialogue[:50]}...\"")
 
-        lang, clean_dialogue = _detect_line_language(dialogue)
-        rvc_model = rvc_map.get(char)
+        voice_name = voice_map[char]
+        voice_audio, voice_text = load_voice(voice_name)
+        if not voice_audio:
+            log_lines.append(f"  ⚠️ Audio file missing for '{voice_name}', skipping.")
+            continue
 
-        if lang and rvc_model:
-            # Hybrid path: Edge-TTS gives correct Hindi/Urdu pronunciation,
-            # RVC then morphs that into this character's actual voice.
-            final_text = clean_dialogue
-            if lang == "hi" and not any('\u0900' <= c <= '\u097F' for c in clean_dialogue):
-                from transliterate import roman_to_devanagari
-                final_text = roman_to_devanagari(clean_dialogue)
-                log_lines.append(f"  🔄 Transliterated to: {final_text}")
-
-            base_path = os.path.join(TEMP_DIR, f"podcast_base_{i}.mp3")
-            ok, err = run_edge_tts(final_text, HINDI_URDU_NEURAL_VOICE[lang], base_path)
-            if not ok:
-                log_lines.append(f"  ❌ Edge-TTS pronunciation step failed: {err}")
-                continue
-
-            out_name = f"podcast_line_{i}.wav"
-            path, gen_log = run_rvc_conversion(base_path, rvc_model, pitch=0, output_name=out_name)
-            if path and os.path.exists(path):
-                log_lines.append(f"  ✅ [{lang.upper()} hybrid: Edge-TTS→RVC '{rvc_model}']")
+        seg = None
+        # ─── Perfect Pronunciation Routing: Hindi/Urdu always goes through the
+        # Microsoft Neural -> RVC hybrid first, so it never sounds broken/foreign-accented ───
+        if contains_hindi_urdu(dialogue):
+            rvc_model = find_rvc_model_for_character(char)
+            if rvc_model:
+                seg, hindi_log = generate_hindi_line_hybrid(dialogue, rvc_model)
+                log_lines.append(f"  🌟 Hindi/Urdu detected → {hindi_log}")
             else:
-                log_lines.append(f"  ❌ RVC step failed: {gen_log}")
+                log_lines.append(
+                    f"  ⚠️ Hindi/Urdu detected but no RVC model found for '{char}'. "
+                    f"Falling back to standard clone (pronunciation may not be perfect). "
+                    f"Add a matching .pth file to rvc_models/ for native pronunciation."
+                )
 
-        else:
-            if lang and not rvc_model:
-                log_lines.append(f"  ⚠️ Hindi/Urdu line detected but no RVC model matches '{char}' "
-                                  f"(expected rvc_models/{char.replace(' ', '_')}.pth) - using standard cloning, "
-                                  f"pronunciation may be imperfect.")
-            voice_name = voice_map[char]
-            voice_audio, voice_text = load_voice(voice_name)
-            if not voice_audio:
-                log_lines.append(f"  ⚠️ Audio file missing for '{voice_name}', skipping.")
-                continue
-
+        if seg is None:
             out_name = f"podcast_line_{i}.wav"
             path, gen_log = run_f5tts(dialogue, voice_audio, voice_text, output_name=out_name)
-            if not (path and os.path.exists(path)):
+            if path and os.path.exists(path):
+                seg = AudioSegment.from_file(path)
+                log_lines.append(f"  ✅ {len(seg)/1000:.1f}s generated")
+            else:
                 log_lines.append(f"  ❌ Failed: {gen_log}")
                 continue
 
-        if path and os.path.exists(path):
-            seg = AudioSegment.from_file(path)
-            audio_segments.append(seg)
-            log_lines.append(f"  ✅ {len(seg)/1000:.1f}s generated")
+        # Smooth cuts: fade in/out so back-and-forth dialogue doesn't sound like sudden robotic silence
+        seg = seg.fade_in(FADE_MS).fade_out(FADE_MS)
+        audio_segments.append(seg)
 
     if not audio_segments:
         return None, "\n".join(log_lines) + "\n\n❌ No audio was generated."
 
-    # Stitch together with pauses, softening each segment's edges into the
-    # silence so transitions don't sound like sudden robotic cuts. A hard
-    # waveform edge dropping straight to a flat zero-silence line is what
-    # produces the audible "click"/"pop" at every speaker change - fading
-    # each clip's start/end removes that discontinuity.
-    log_lines.append(f"\n🔗 Stitching {len(audio_segments)} segments with smoothed transitions...")
-    FADE_MS = 60  # short enough to stay inaudible as an effect, long enough to kill the click
-
-    smoothed = []
-    for idx, seg in enumerate(audio_segments):
-        fade_amt = min(FADE_MS, len(seg) // 2)  # never fade more than half a very short clip
-        if fade_amt > 0:
-            if idx != 0:
-                seg = seg.fade_in(fade_amt)
-            if idx != len(audio_segments) - 1:
-                seg = seg.fade_out(fade_amt)
-        smoothed.append(seg)
-
-    final = smoothed[0]
-    for seg in smoothed[1:]:
+    # Stitch together with pauses (short crossfade-safe fades already applied per-segment)
+    log_lines.append(f"\n🔗 Stitching {len(audio_segments)} segments...")
+    final = audio_segments[0]
+    for seg in audio_segments[1:]:
         final = final + pause + seg
 
     output_path = os.path.join(BASE_DIR, "podcast_output.wav")
@@ -578,76 +531,36 @@ def edit_audio_replace(audio_path, start_s, end_s, text, voice_name, progress=gr
 TRAINING_DIR = os.path.join(BASE_DIR, "training_data")
 os.makedirs(TRAINING_DIR, exist_ok=True)
 
-def _denoise_audio(audio, progress=None, progress_range=(0.2, 0.45)):
-    """Reduce background noise/music beds via spectral gating (noisereduce),
-    operating on the raw sample data. Expects mono audio. Wrapped so a
-    denoise failure degrades gracefully (returns the original audio +
-    a warning) instead of aborting the whole preprocessing run - this is
-    a newer/less battle-tested dependency than pydub, so don't let it take
-    the pipeline down with it.
+import noisereduce as nr
+import numpy as np
+from pydub.silence import detect_nonsilent
 
-    Processes in 30s windows rather than one call across the whole file:
-    on a long (10+ min) clip on a slow CPU, a single blocking call would
-    leave the progress bar frozen with zero feedback for however long that
-    takes. Windowing gives incremental progress and keeps each individual
-    call's CPU/memory cost bounded. Trade-off: very faint discontinuities
-    are possible at window boundaries (30s apart) - inaudible in practice,
-    and a reasonable price for a responsive UI on CPU-only machines.
-    """
-    try:
-        import noisereduce as nr
-        import numpy as np
-        samples = np.array(audio.get_array_of_samples()).astype(np.float32)
-        sr = audio.frame_rate
-        window_samples = int(30 * sr)  # 30s windows
-        total = len(samples)
-        out = np.empty_like(samples)
-        n_windows = max(1, (total + window_samples - 1) // window_samples)
+def reduce_background_noise(audio: AudioSegment) -> AudioSegment:
+    """Filters out background static/music/hum before chunking."""
+    sr = audio.frame_rate
+    samples = np.array(audio.get_array_of_samples()).astype(np.float32)
+    if audio.channels == 2:
+        samples = samples.reshape((-1, 2)).mean(axis=1)
+    reduced = nr.reduce_noise(y=samples, sr=sr, stationary=False)
+    peak = np.max(np.abs(reduced)) + 1e-9
+    reduced_int16 = np.int16(reduced / peak * 32767)
+    return AudioSegment(reduced_int16.tobytes(), frame_rate=sr, sample_width=2, channels=1)
 
-        for i in range(n_windows):
-            start = i * window_samples
-            end = min(start + window_samples, total)
-            out[start:end] = nr.reduce_noise(y=samples[start:end], sr=sr, stationary=False)
-            if progress is not None:
-                lo, hi = progress_range
-                frac = lo + (hi - lo) * ((i + 1) / n_windows)
-                progress(frac, desc=f"Removing background noise... ({i+1}/{n_windows})")
-
-        reduced = np.clip(out, -32768, 32767).astype(np.int16)
-        return audio._spawn(reduced.tobytes()), None
-    except Exception as e:
-        return audio, f"denoise skipped ({e})"
-
-def _trim_silence(audio, min_silence_len=600, silence_thresh_offset=16, keep_gap_ms=200):
-    """Cut out long dead-air stretches so training chunks are packed with
-    actual speech instead of being wasted on silence - this is what makes
-    'genuinely messy downloaded audio' (long pauses, dead air) unusable as
-    training data if left untouched. Keeps a short natural gap between
-    speech segments rather than splicing them together edge-to-edge.
-    Returns (trimmed_audio, seconds_removed).
-    """
-    from pydub.silence import detect_nonsilent
-    original_len = len(audio)
-    silence_thresh = audio.dBFS - silence_thresh_offset
-    nonsilent_ranges = detect_nonsilent(audio, min_silence_len=min_silence_len, silence_thresh=silence_thresh)
-
-    if not nonsilent_ranges:
-        # Detection found nothing "non-silent" at all - likely a very quiet
-        # clip rather than truly empty. Don't destroy it; let normalization/
-        # chunking downstream handle it instead of returning empty audio.
-        return audio, 0.0
-
-    gap = AudioSegment.silent(duration=keep_gap_ms)
-    trimmed = audio[nonsilent_ranges[0][0]:nonsilent_ranges[0][1]]
-    for start, end in nonsilent_ranges[1:]:
-        trimmed += gap + audio[start:end]
-
-    removed_seconds = (original_len - len(trimmed)) / 1000.0
-    return trimmed, removed_seconds
+def cut_dead_air(audio: AudioSegment, min_silence_len=400, keep_silence_ms=150) -> AudioSegment:
+    """Detects and removes long silent gaps so the model doesn't train on dead air."""
+    silence_thresh = audio.dBFS - 16  # relative to this clip's own loudness
+    ranges = detect_nonsilent(audio, min_silence_len=min_silence_len, silence_thresh=silence_thresh)
+    if not ranges:
+        return audio
+    cleaned = AudioSegment.empty()
+    for start, end in ranges:
+        start = max(0, start - keep_silence_ms)
+        end = min(len(audio), end + keep_silence_ms)
+        cleaned += audio[start:end]
+    return cleaned
 
 def preprocess_training_audio(audio_path, chunk_seconds=10, normalize_db=-20.0, progress=gr.Progress()):
-    """Real ML data pipeline: denoise, trim silence, chunk, and normalize
-    audio for model training."""
+    """Real ML data pipeline: clean, normalize, and chunk audio for model training."""
     if not audio_path:
         return None, "Upload an audio file first."
     try:
@@ -655,22 +568,27 @@ def preprocess_training_audio(audio_path, chunk_seconds=10, normalize_db=-20.0, 
         audio = AudioSegment.from_file(audio_path)
         original_duration = len(audio) / 1000.0
 
-        # Step 1: Convert to mono 16kHz first - denoise/silence-detection
-        # both need a consistent single-channel signal to work on, and this
-        # was previously done last, after chunking logic was already laid out.
-        audio = audio.set_channels(1).set_frame_rate(16000)
+        # Step 1: Noise filter (remove background static/music/hum)
+        progress(0.25, desc="Filtering background noise/static...")
+        try:
+            audio = reduce_background_noise(audio)
+            noise_note = "✅ Background noise reduced"
+        except Exception as e:
+            noise_note = f"⚠️ Noise filter skipped ({e})"
 
-        # Step 2: Denoise (background music/hiss/hum from downloaded clips)
-        audio, denoise_warning = _denoise_audio(audio, progress=progress)
+        # Step 2: Silence cutter (remove dead air)
+        progress(0.4, desc="Cutting silent dead air...")
+        pre_silence_len = len(audio) / 1000.0
+        audio = cut_dead_air(audio)
+        removed_s = pre_silence_len - (len(audio) / 1000.0)
 
         # Step 3: Normalize volume (ML best practice for consistent training data)
-        progress(0.4, desc="Normalizing volume levels...")
+        progress(0.55, desc="Normalizing volume levels...")
         change_in_dBFS = normalize_db - audio.dBFS
         audio = audio.apply_gain(change_in_dBFS)
 
-        # Step 4: Trim long silences/dead air
-        progress(0.55, desc="Trimming silence and dead air...")
-        audio, silence_removed_s = _trim_silence(audio)
+        # Step 4: Convert to mono 16kHz (standard for speech ML models)
+        audio = audio.set_channels(1).set_frame_rate(16000)
 
         # Step 5: Chunk into training segments
         progress(0.7, desc="Chunking into training segments...")
@@ -690,8 +608,8 @@ def preprocess_training_audio(audio_path, chunk_seconds=10, normalize_db=-20.0, 
         log = (
             f"✅ Audio Dataset Preprocessed!\n"
             f"📊 Original Duration: {original_duration:.1f}s\n"
-            f"🧹 Denoised: {'yes' if not denoise_warning else denoise_warning}\n"
-            f"🔇 Silence Removed: {silence_removed_s:.1f}s\n"
+            f"🔇 {noise_note}\n"
+            f"✂️ Removed {removed_s:.1f}s of dead air\n"
             f"🔊 Normalized to: {normalize_db} dBFS\n"
             f"🎵 Resampled to: 16kHz Mono\n"
             f"✂️ Created {len(chunks)} training chunks ({chunk_seconds}s each)\n"
@@ -948,7 +866,7 @@ LUFFY: Let's gooo!
         with gr.TabItem("🎤 Voice-to-Voice (RVC)", visible=False):
             gr.Markdown("""### True Emotional Voice Cloning (Speech-to-Speech)
 Upload an audio of **you acting out a line**, select a downloaded `.pth` anime character model, and the AI will convert your voice while preserving exactly the timing, emotion, and breath.
-*(Models must be placed in the `rvc_models/` folder next to the app - `rvc_models/` locally, or the mounted volume in Docker)*""")
+*(Models must be placed in `e:\project\searching\anime_voice_cloner\\rvc_models`)*""")
             with gr.Row():
                 with gr.Column():
                     rvc_in = gr.Audio(type="filepath", label="Input Audio (Your acting/reference)")
@@ -1051,12 +969,4 @@ The system uses **OpenAI Whisper's neural encoder** to extract voice embeddings 
 if __name__ == "__main__":
     print("Launching Advanced Voice Studio...")
     print(f"Saved Voices: {get_saved_voices()}")
-    # In Docker, GRADIO_SERVER_NAME=0.0.0.0 (set in docker-compose.yml) so the
-    # port mapping can actually reach the app. Locally on Windows this still
-    # defaults to 127.0.0.1 + opens your browser automatically, unchanged.
-    _in_container = os.environ.get("GRADIO_SERVER_NAME") is not None
-    interface.launch(
-        server_name=os.environ.get("GRADIO_SERVER_NAME", "127.0.0.1"),
-        inbrowser=not _in_container,
-        css=custom_css,
-    )
+    interface.launch(server_name="0.0.0.0", server_port=7860, inbrowser=True, css=custom_css)
